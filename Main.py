@@ -1,506 +1,422 @@
-from tkinter import *
-import tkinter
-from tkinter import filedialog
-from tkinter.filedialog import askopenfilename
-from tkinter import simpledialog
+import os
+import pickle
+import zipfile
+import tempfile
+from pathlib import Path
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import os
-import pickle
-import joblib
-import matplotlib.pyplot as plt
-from pathlib import Path
+import streamlit as st
 import librosa
 import librosa.display
-import cv2
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-
-from sklearn.preprocessing import MinMaxScaler,LabelEncoder
-from sklearn.metrics import confusion_matrix, classification_report, accuracy_score, precision_score, recall_score, f1_score,roc_curve, auc
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, label_binarize
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+    roc_curve,
+    auc,
+)
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, AdaBoostClassifier
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-from sklearn.naive_bayes import GaussianNB
-from sklearn.utils import resample
+# TensorFlow is used only for the proposed CNN.
+try:
+    from tensorflow.keras.models import Sequential, load_model
+    from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+    from tensorflow.keras.utils import to_categorical
+    from tensorflow.keras.callbacks import EarlyStopping
+    TENSORFLOW_AVAILABLE = True
+except Exception:
+    TENSORFLOW_AVAILABLE = False
 
-import os
-import joblib
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.callbacks import EarlyStopping
+APP_TITLE = "Neonatal Cry Analysis"
+MODEL_DIR = Path("model")
+RESULTS_DIR = Path("results")
+MODEL_DIR.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
 
+st.set_page_config(page_title=APP_TITLE, page_icon="👶", layout="wide")
 
-from sklearn.preprocessing import LabelEncoder,label_binarize
+st.title("👶 Neonatal Cry Analysis")
+st.caption("MFCC feature extraction and machine-learning classification of infant cry audio.")
 
-accuracy = []
-precision = []
-recall = []
-fscore = []
-
-model_folder = "Model"
-
-def Upload_Dataset():
-    global filename,categories,num_classes
-    text.delete('1.0', END)
-    filename = filedialog.askdirectory(initialdir=".")
-    categories = [d for d in os.listdir(filename) if os.path.isdir(os.path.join(filename, d))]
-    num_classes = len(categories)
-    text.insert(END,'Dataset loaded\n')
-    text.insert(END,"Classes found in dataset: "+str(categories)+"\n")
+# Keep app data available across Streamlit reruns.
+for key, default in {
+    "dataset_dir": None,
+    "X": None,
+    "y": None,
+    "X_train": None,
+    "X_test": None,
+    "y_train": None,
+    "y_test": None,
+    "trained_models": {},
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 def extract_features(file_path):
-    y, sr = librosa.load(file_path, sr=None)  # Load audio file
-    
-    # Feature extraction
-    features = []
-    
-    # 1. MFCC (Mel-Frequency Cepstral Coefficients)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=10)
-    mfcc_mean = np.mean(mfcc, axis=1)
-    features.extend(mfcc_mean)
-      
-    return np.array(features)
-    
-def load_dataset(X_file,Y_file,model_folder,dataset_path):
-    X = []
-    y = []
-    for subfolder in os.listdir(dataset_path):          
-        class_label = subfolder
-        subfolder_path = os.path.join(dataset_path, subfolder)
-        for file in os.listdir(subfolder_path):
-            if file.endswith('.wav'):
-                file_path = os.path.join(subfolder_path, file)
-                print(file_path)
-                features = extract_features(file_path)
-                X.append(features)
-                y.append(class_label)
-    np.save(X_file, X)
-    np.save(Y_file, y)
-    return np.array(X), np.array(y)
-
-def Preprocess_Dataset():
-    global X,Y,filename
-    filepath = Path(filename)
-    last_folder=filepath.name
- 
-    
-    X_file = os.path.join(model_folder, "X.txt.npy")
-    Y_file = os.path.join(model_folder, "Y.txt.npy")
-
-    if os.path.exists(X_file) and os.path.exists(Y_file):
-        X = np.load(X_file)
-        Y = np.load(Y_file)
-    else:
-        X, Y = load_dataset(X_file,Y_file,model_folder,last_folder)
-    
-#    desired_samples = 3000
- #   X, Y = resample(X, Y, n_samples=desired_samples, random_state=42)
-    
-    text.insert(END, "Preprocessing and MFCC Feature Extraction completed on Dataset: " + str(filename) + "\n\n")
-    text.insert(END, "Input MFCC Feature Set Size: " + str(X.shape) + "\n\n")
+    """Extract 10 mean MFCC values from an audio file."""
+    audio, sample_rate = librosa.load(str(file_path), sr=None, mono=True)
+    mfcc = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=10)
+    return np.mean(mfcc, axis=1)
 
 
-def Train_Test_Splitting():
-    global X,Y
-    global x_train,y_train,x_test,y_test
+def extract_dataset(dataset_dir):
+    """Read WAV files from class subfolders: dataset/class_name/audio.wav."""
+    features, labels = [], []
+    dataset_dir = Path(dataset_dir)
 
-    # Create a count plot
-
-
-    x_train, x_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=0)
-    
-# Display information about the dataset
-    text.delete('1.0', END)
-    text.insert(END, "Total records found in dataset: " + str(X.shape[0]) + "\n\n")
-    text.insert(END, "Total records found in dataset to train: " + str(x_train.shape[0]) + "\n\n")
-    text.insert(END, "Total records found in dataset to test: " + str(x_test.shape[0]) + "\n\n")
-
-def Calculate_Metrics(algorithm, predict, y_test,y_score):
-    global categories
-    if not os.path.exists('results'):
-        os.makedirs('results')
-        
-    a = accuracy_score(y_test,predict)*100
-    p = precision_score(y_test, predict,average='macro') * 100
-    r = recall_score(y_test, predict,average='macro') * 100
-    f = f1_score(y_test, predict,average='macro') * 100
-
-    accuracy.append(a)
-    precision.append(p)
-    recall.append(r)
-    fscore.append(f)
-    
-    text.insert(END,algorithm+" Accuracy  :  "+str(a)+"\n")
-    text.insert(END,algorithm+" Precision : "+str(p)+"\n")
-    text.insert(END,algorithm+" Recall    : "+str(r)+"\n")
-    text.insert(END,algorithm+" FScore    : "+str(f)+"\n")
-    conf_matrix = confusion_matrix(y_test, predict)
-    
-    CR = classification_report(y_test, predict,target_names=categories)
-    text.insert(END,algorithm+' Classification Report \n')
-    text.insert(END,algorithm+ str(CR) +"\n\n")
-
-    
-    plt.figure() 
-    ax = sns.heatmap(conf_matrix, xticklabels = categories, yticklabels = categories, annot = True, cmap="viridis" ,fmt ="g");
-    ax.set_ylim([0,len(categories)])
-    plt.title(algorithm+" Confusion matrix") 
-    plt.ylabel('True class') 
-    plt.xlabel('Predicted class') 
-    plt.savefig(f"results/{algorithm.replace(' ', '_')}_confusion_matrix.png")
-    plt.show()     
-    print(y_score)
-
-    if y_score is not None:
-        y_test_bin = label_binarize(y_test, classes=range(len(categories)))
-        fpr, tpr, roc_auc = dict(), dict(), dict()
-
-        for i in range(len(categories)):
-            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
-            roc_auc[i] = auc(fpr[i], tpr[i])
-            
-
-        plt.figure(figsize=(10, 8))
-        for i in range(len(categories)):
-            plt.plot(fpr[i], tpr[i], label=f'Class {categories[i]} (AUC = {roc_auc[i]:.2f})')
-        plt.plot([0, 1], [0, 1], 'k--', label='Random')
-        plt.title(f"{algorithm} ROC Curves (One-vs-Rest)")
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.legend(loc='lower right')
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"results/{algorithm.replace(' ', '_')}_roc_curve.png")
-        plt.show()
-        
-
-def existing_classifier():
-    global x_train, y_train, x_test, y_test
-    text.delete('1.0', END)
-
-    mlmodel = SVC(probability=True)  # enable probability estimation
-    mlmodel.fit(x_train, y_train)
-    
-    y_pred = mlmodel.predict(x_test)
-    if hasattr(mlmodel, "predict_proba"):
-        y_score = mlmodel.predict_proba(x_test)
-    else:
-        y_score = mlmodel.decision_function(x_test)
-    
-    Calculate_Metrics("Existing SVM", y_pred, y_test, y_score=y_score)
-
-
-def existing_classifier1():
-    global x_train, y_train, x_test, y_test
-    text.delete('1.0', END)
-
-    mlmodel = KNeighborsClassifier(n_neighbors=500)
-    mlmodel.fit(x_train, y_train)
-    
-    y_pred = mlmodel.predict(x_test)
-    if hasattr(mlmodel, "predict_proba"):
-        y_score = mlmodel.predict_proba(x_test)
-    else:
-        y_score = None  # No alternative available
-    
-    Calculate_Metrics("Existing KNN", y_pred, y_test, y_score=y_score)
-
-
-def existing_classifier2():
-    global x_train, y_train, x_test, y_test
-    text.delete('1.0', END)
-
-    mlmodel = DecisionTreeClassifier(max_depth=4, min_samples_leaf=8, min_samples_split=8)
-    mlmodel.fit(x_train, y_train)
-    
-    y_pred = mlmodel.predict(x_test)
-    y_score = mlmodel.predict_proba(x_test)  # DTC supports predict_proba
-    
-    Calculate_Metrics("Existing DTC", y_pred, y_test, y_score=y_score)
-
-
-def existing_classifier4():
-    global x_train, y_train, x_test, y_test
-    text.delete('1.0', END)
-
-    mlmodel = AdaBoostClassifier()
-    mlmodel.fit(x_train, y_train)
-    
-    y_pred = mlmodel.predict(x_test)
-    y_score = mlmodel.predict_proba(x_test)  # AdaBoost supports predict_proba
-    
-    Calculate_Metrics("Existing AdaBoost Classifier", y_pred, y_test, y_score=y_score)
-
-
-def existing_classifier5():
-    global x_train, y_train, x_test, y_test
-    text.delete('1.0', END)
-
-    mlmodel = LinearDiscriminantAnalysis()
-    mlmodel.fit(x_train, y_train)
-    
-    y_pred = mlmodel.predict(x_test)
-    y_score = mlmodel.predict_proba(x_test)  # LDA supports predict_proba
-    
-    Calculate_Metrics("Existing Linear Discriminant Analysis", y_pred, y_test, y_score=y_score)
-    
-
-def cnn_classifier():
-    global x_train, y_train, x_test, y_test, mlmodel, text,num_classes
-    text.delete('1.0', END)
-
-    le = LabelEncoder()
-    y_train_encoded = le.fit_transform(y_train)
-    y_test_encoded = le.transform(y_test)
-
-    # Save the LabelEncoder
-    encoder_path = "model/label_encoder.pkl"
-    with open(encoder_path, "wb") as f:
-        pickle.dump(le, f)
-
-    model_path = "model/cnn_model.h5"
-    history_path = "model/cnn_model_history.pkl"
-
-    if os.path.exists(model_path):
-        model = load_model(model_path)
-
-     
-    else:
-        # Reshape data for CNN input
-        x_train_reshaped = x_train.reshape((x_train.shape[0], x_train.shape[1], 1))
-        x_test_reshaped = x_test.reshape((x_test.shape[0], x_test.shape[1], 1))
-
-        y_train_cat = to_categorical(y_train_encoded, num_classes=num_classes)
-        y_test_cat = to_categorical(y_test_encoded, num_classes=num_classes)
-
-        # Build CNN model
-        model = Sequential()
-        model.add(Conv1D(64, kernel_size=3, activation='relu', input_shape=(x_train.shape[1], 1)))
-        model.add(MaxPooling1D(pool_size=2))
-        model.add(Flatten())
-        model.add(Dense(100, activation='relu'))
-        model.add(Dense(num_classes, activation='softmax'))
-
-        model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
-        # Train model
-        history = model.fit(
-            x_train_reshaped, y_train_cat,
-            epochs=100, batch_size=32, verbose=2,
-            validation_split=0.2
+    class_dirs = sorted(p for p in dataset_dir.iterdir() if p.is_dir())
+    if not class_dirs:
+        raise ValueError(
+            "No class folders were found. The ZIP must contain folders such as "
+            "'hunger/', 'discomfort/', and WAV files inside each folder."
         )
 
-        # Save model and history
-        model.save(model_path)
-        with open(history_path, "wb") as f:
-            pickle.dump(history.history, f)
+    skipped = []
+    for class_dir in class_dirs:
+        wav_files = sorted(p for p in class_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".wav")
+        for audio_path in wav_files:
+            try:
+                features.append(extract_features(audio_path))
+                labels.append(class_dir.name)
+            except Exception as exc:
+                skipped.append(f"{audio_path.name}: {exc}")
 
-    # Predict and evaluate
-    y_pred = np.argmax(model.predict(x_test.reshape((x_test.shape[0], x_test.shape[1], 1))), axis=1)
-    # Load training history
-    history_path = "model/cnn_model_history.pkl"
-    with open(history_path, "rb") as f:
-        history = pickle.load(f)
+    if not features:
+        raise ValueError("No readable .wav files were found in the class folders.")
 
-    # Plot training & validation accuracy
-    plt.figure(figsize=(12,5))
+    if skipped:
+        st.warning(f"Skipped {len(skipped)} unreadable audio file(s).")
 
-    plt.subplot(1,2,1)
-    plt.plot(history['accuracy'], label='Train Accuracy')
-    plt.plot(history['val_accuracy'], label='Validation Accuracy')
-    plt.title('CNN Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    plt.grid(True)
+    return np.asarray(features, dtype=np.float32), np.asarray(labels)
 
-    # Plot training & validation loss
-    plt.subplot(1,2,2)
-    plt.plot(history['loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title('CNN Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
 
+def split_dataset(test_size=0.2):
+    X = st.session_state.X
+    y = st.session_state.y
+    if X is None or y is None:
+        raise ValueError("Upload and preprocess a dataset first.")
+
+    # Stratification keeps class proportions where each class has enough examples.
+    counts = pd.Series(y).value_counts()
+    stratify = y if len(counts) > 1 and counts.min() >= 2 else None
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=42, stratify=stratify
+    )
+    st.session_state.X_train = X_train
+    st.session_state.X_test = X_test
+    st.session_state.y_train = y_train
+    st.session_state.y_test = y_test
+    return X_train, X_test, y_train, y_test
+
+
+def show_metrics(model_name, y_true, y_pred, y_score=None, score_classes=None):
+    """Display classification metrics and plots in Streamlit."""
+    accuracy = accuracy_score(y_true, y_pred) * 100
+    precision = precision_score(y_true, y_pred, average="macro", zero_division=0) * 100
+    recall = recall_score(y_true, y_pred, average="macro", zero_division=0) * 100
+    f1 = f1_score(y_true, y_pred, average="macro", zero_division=0) * 100
+
+    st.subheader(f"{model_name} — evaluation")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Accuracy", f"{accuracy:.2f}%")
+    m2.metric("Precision", f"{precision:.2f}%")
+    m3.metric("Recall", f"{recall:.2f}%")
+    m4.metric("F1-score", f"{f1:.2f}%")
+
+    labels = sorted(set(y_true) | set(y_pred))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="viridis",
+                xticklabels=labels, yticklabels=labels, ax=ax)
+    ax.set_xlabel("Predicted class")
+    ax.set_ylabel("True class")
+    ax.set_title(f"{model_name} confusion matrix")
     plt.tight_layout()
-    plt.show()
+    st.pyplot(fig)
+    plt.close(fig)
 
-    y_score = model.predict(x_test.reshape((x_test.shape[0], x_test.shape[1], 1)))  # returns probabilities
+    report = classification_report(y_true, y_pred, labels=labels, zero_division=0)
+    with st.expander("Classification report"):
+        st.text(report)
 
-    Calculate_Metrics("CNN Classifier", y_pred, y_test_encoded, y_score=y_score)
+    # ROC curves are plotted only when valid probability scores are available.
+    if y_score is not None and score_classes is not None:
+        try:
+            classes = list(score_classes)
+            y_true_bin = label_binarize(y_true, classes=classes)
+            if y_true_bin.ndim == 2 and y_true_bin.shape[1] == y_score.shape[1]:
+                fig, ax = plt.subplots(figsize=(8, 5))
+                plotted = False
+                for i, class_name in enumerate(classes):
+                    # ROC is undefined if the test set contains only one outcome for this class.
+                    if len(np.unique(y_true_bin[:, i])) < 2:
+                        continue
+                    fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_score[:, i])
+                    roc_auc = auc(fpr, tpr)
+                    ax.plot(fpr, tpr, label=f"{class_name} (AUC={roc_auc:.2f})")
+                    plotted = True
+                ax.plot([0, 1], [0, 1], "k--", label="Random")
+                ax.set_title(f"{model_name} ROC curves (one-vs-rest)")
+                ax.set_xlabel("False positive rate")
+                ax.set_ylabel("True positive rate")
+                ax.legend(loc="lower right")
+                ax.grid(True)
+                plt.tight_layout()
+                if plotted:
+                    st.pyplot(fig)
+                else:
+                    st.info("ROC curves cannot be calculated because the test set lacks examples from one or more classes.")
+                plt.close(fig)
+        except Exception as exc:
+            st.info(f"ROC curve not available for this split: {exc}")
 
 
- 
+def train_sklearn_model(model_name):
+    X_train = st.session_state.X_train
+    X_test = st.session_state.X_test
+    y_train = st.session_state.y_train
+    y_test = st.session_state.y_test
 
-def Prediction():
-   # File selection dialog
-    filename = filedialog.askopenfilename(initialdir="testvoice")
-    text.delete('1.0', END)
-    text.insert(END, f'{filename} Loaded\n')
-
-    # Feature extraction
-    features = extract_features(filename)
-    features = features.reshape(1, -1)
-    
-    # Load trained CNN model
-    model_path = "model/cnn_model.h5"
-    if os.path.exists(model_path):
-        model = load_model(model_path)
-    else:
-        text.insert(END, "CNN model not found.\n")
+    if X_train is None:
+        st.error("Split the dataset into training and testing sets first.")
         return
 
-    # Load LabelEncoder
-    encoder_path = "model/label_encoder.pkl"
-    if os.path.exists(encoder_path):
-        with open(encoder_path, "rb") as f:
-            le = pickle.load(f)
+    if model_name == "SVM":
+        model = SVC(probability=True, random_state=42)
+    elif model_name == "KNN":
+        model = KNeighborsClassifier(n_neighbors=min(5, len(X_train)))
+    elif model_name == "Decision Tree":
+        model = DecisionTreeClassifier(max_depth=4, min_samples_leaf=2, min_samples_split=4, random_state=42)
+    elif model_name == "AdaBoost":
+        model = AdaBoostClassifier(random_state=42)
+    elif model_name == "Linear Discriminant Analysis":
+        model = LinearDiscriminantAnalysis()
     else:
-        text.insert(END, "Label encoder not found.\n")
+        st.error("Unknown model.")
         return
 
-    # Reshape features for CNN prediction
-    features = features.reshape((1, features.shape[1], 1))
+    with st.spinner(f"Training {model_name}..."):
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        y_score = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None
+        score_classes = list(model.classes_) if y_score is not None else None
 
-    # Predict using CNN
-    cnn_features = model.predict(features)
-    predicted_category_idx = np.argmax(cnn_features, axis=1)
-    
-    # Decode using LabelEncoder
-    predicted_category = le.inverse_transform(predicted_category_idx)[0]
-    text.insert(END, f"Predicted Outcome From Test Audio is: {predicted_category}\n\n")
-
-    # Load audio file
-    y, sr = librosa.load(filename, sr=None)
-
-    # Create a waveplot
-    plt.figure(figsize=(10, 4))
-    librosa.display.waveshow(y, sr=sr)
-    plt.xlabel('Time (s)')
-    plt.ylabel('Amplitude')
-
-    # Save plot to an image buffer
-    plt.savefig("waveplot.png")
-    plt.close()
-
-    # Load the saved waveplot image
-    waveplot_img = cv2.imread("waveplot.png")
-    if waveplot_img is not None:
-        # Add the predicted category text on the waveplot
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        position = (50, 50)  # Position to place the text
-        font_scale = 1
-        font_color = (0, 0, 255)  # Red color in BGR
-        thickness = 2
-        line_type = cv2.LINE_AA
-
-        cv2.putText(waveplot_img, f"Predicted: {predicted_category}", position, font, font_scale, font_color, thickness, line_type)
-
-        # Display the waveplot with annotation
-        cv2.imshow("Waveplot with Prediction", waveplot_img)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        
-def close():
-    main.destroy()
+    st.session_state.trained_models[model_name] = model
+    with open(MODEL_DIR / f"{model_name.lower().replace(' ', '_')}.pkl", "wb") as file:
+        pickle.dump(model, file)
+    show_metrics(model_name, y_test, y_pred, y_score, score_classes)
 
 
-import tkinter as tk
-from PIL import Image, ImageTk
+def train_cnn():
+    if not TENSORFLOW_AVAILABLE:
+        st.error("TensorFlow could not be imported in this environment. Check requirements.txt and Streamlit Cloud logs.")
+        return
+    if st.session_state.X_train is None:
+        st.error("Split the dataset first.")
+        return
+
+    X_train = st.session_state.X_train[..., np.newaxis]
+    X_test = st.session_state.X_test[..., np.newaxis]
+    y_train = st.session_state.y_train
+    y_test = st.session_state.y_test
+
+    encoder = LabelEncoder()
+    y_train_encoded = encoder.fit_transform(y_train)
+    # Handle test labels that are absent from training split.
+    known_mask = np.isin(y_test, encoder.classes_)
+    if not known_mask.all():
+        st.warning("Some test classes were absent from the training split; those rows will be excluded from CNN evaluation.")
+        X_test = X_test[known_mask]
+        y_test = y_test[known_mask]
+    if len(y_test) == 0:
+        st.error("No test examples belong to classes present in the training set.")
+        return
+
+    y_test_encoded = encoder.transform(y_test)
+    class_count = len(encoder.classes_)
+    y_train_cat = to_categorical(y_train_encoded, num_classes=class_count)
+
+    model = Sequential([
+        Conv1D(64, kernel_size=3, activation="relu", input_shape=(X_train.shape[1], 1)),
+        MaxPooling1D(pool_size=2),
+        Flatten(),
+        Dense(100, activation="relu"),
+        Dropout(0.2),
+        Dense(class_count, activation="softmax"),
+    ])
+    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
+
+    with st.spinner("Training CNN. This may take a few minutes..."):
+        history = model.fit(
+            X_train, y_train_cat, epochs=100, batch_size=32,
+            validation_split=0.2, callbacks=[early_stop], verbose=0
+        )
+
+    model.save(MODEL_DIR / "cnn_model.keras")
+    with open(MODEL_DIR / "label_encoder.pkl", "wb") as file:
+        pickle.dump(encoder, file)
+    with open(MODEL_DIR / "cnn_history.pkl", "wb") as file:
+        pickle.dump(history.history, file)
+
+    probabilities = model.predict(X_test, verbose=0)
+    predicted_indices = np.argmax(probabilities, axis=1)
+    y_pred = encoder.inverse_transform(predicted_indices)
+    st.session_state.trained_models["CNN"] = model
+    show_metrics("CNN", y_test, y_pred, probabilities, list(encoder.classes_))
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(history.history.get("accuracy", []), label="Training accuracy")
+    axes[0].plot(history.history.get("val_accuracy", []), label="Validation accuracy")
+    axes[0].set_title("CNN accuracy")
+    axes[0].set_xlabel("Epoch")
+    axes[0].legend()
+    axes[1].plot(history.history.get("loss", []), label="Training loss")
+    axes[1].plot(history.history.get("val_loss", []), label="Validation loss")
+    axes[1].set_title("CNN loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].legend()
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
 
-main = tkinter.Tk()
-screen_width = main.winfo_screenwidth()
-screen_height = main.winfo_screenheight()
-main.geometry(f"{screen_width}x{screen_height}")
+# Sidebar: dataset upload and workflow.
+st.sidebar.header("1. Dataset")
+st.sidebar.write("Upload a ZIP file with one folder per cry class, containing `.wav` files.")
+zip_file = st.sidebar.file_uploader("Upload dataset ZIP", type=["zip"])
 
-# ------------------ Load and place background ------------------
-bg_image = Image.open("background.png")  
-bg_image = bg_image.resize((screen_width, screen_height))
-bg_photo = ImageTk.PhotoImage(bg_image)
+if zip_file is not None:
+    if st.sidebar.button("Extract and load dataset"):
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix="cry_dataset_"))
+            with zipfile.ZipFile(BytesIO(zip_file.getvalue())) as archive:
+                # Basic ZIP path safety check.
+                for member in archive.namelist():
+                    target = (temp_dir / member).resolve()
+                    if not str(target).startswith(str(temp_dir.resolve()) + os.sep) and target != temp_dir.resolve():
+                        raise ValueError("The ZIP contains an unsafe file path.")
+                archive.extractall(temp_dir)
 
-background_label = tk.Label(main, image=bg_photo)
-background_label.place(x=0, y=0, relwidth=1, relheight=1)
+            # Support ZIP files where all classes are inside one top-level directory.
+            candidates = [p for p in temp_dir.iterdir() if p.is_dir()]
+            dataset_root = temp_dir
+            if len(candidates) == 1:
+                child_dirs = [p for p in candidates[0].iterdir() if p.is_dir()]
+                if child_dirs:
+                    dataset_root = candidates[0]
 
+            X, y = extract_dataset(dataset_root)
+            st.session_state.dataset_dir = str(dataset_root)
+            st.session_state.X = X
+            st.session_state.y = y
+            st.session_state.X_train = None
+            st.session_state.X_test = None
+            st.session_state.y_train = None
+            st.session_state.y_test = None
+            st.session_state.trained_models = {}
+            st.sidebar.success("Dataset loaded.")
+        except Exception as exc:
+            st.sidebar.error(f"Could not load dataset: {exc}")
 
-font = ('times', 18, 'bold')
-title = Label(main, text="Prediction of Baby Cry using CNN")
-title.config(bg='white', fg='black')  
-title.config(font=font)           
-title.config(height=3, width=120)       
-title.place(relx=0.5, y=20, anchor='n')  # Centered at top
-title.pack()
+if st.session_state.X is not None:
+    X = st.session_state.X
+    y = st.session_state.y
+    st.subheader("Dataset overview")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Audio files processed", len(y))
+    col2.metric("MFCC features per file", X.shape[1])
+    col3.metric("Cry classes", len(np.unique(y)))
+    st.write("Class distribution")
+    counts = pd.Series(y).value_counts().rename_axis("Class").reset_index(name="Audio files")
+    st.dataframe(counts, use_container_width=True)
 
-font1 = ('times', 13, 'bold')
-Button1 = Button(main, text="Upload Dataset", command=Upload_Dataset)
-Button1.place(x=20,y=100)
-Button1.config(font=font1)
+    st.sidebar.header("2. Preprocessing")
+    if st.sidebar.button("Prepare train/test split"):
+        try:
+            X_train, X_test, y_train, y_test = split_dataset()
+            st.sidebar.success("Train/test split completed.")
+        except Exception as exc:
+            st.sidebar.error(str(exc))
 
-Button1 = Button(main, text="Preprocess Dataset", command=Preprocess_Dataset)
-Button1.place(x=20,y=150)
-Button1.config(font=font1)
+    if st.session_state.X_train is not None:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Training records", len(st.session_state.X_train))
+        c2.metric("Testing records", len(st.session_state.X_test))
+        c3.metric("Feature count", st.session_state.X_train.shape[1])
 
-Button1 = Button(main, text="Train Test Splitting", command=Train_Test_Splitting)
-Button1.place(x=20,y=200)
-Button1.config(font=font1) 
+        st.sidebar.header("3. Train models")
+        model_choice = st.sidebar.selectbox(
+            "Choose a classifier",
+            ["SVM", "KNN", "Decision Tree", "AdaBoost", "Linear Discriminant Analysis", "CNN"]
+        )
+        if st.sidebar.button("Train and evaluate"):
+            if model_choice == "CNN":
+                train_cnn()
+            else:
+                train_sklearn_model(model_choice)
 
+st.divider()
+st.subheader("Predict a cry category")
+st.write("Upload a `.wav` file. Train the CNN above first, or deploy a previously trained CNN and label encoder in the `model/` folder.")
+audio_file = st.file_uploader("Choose test audio", type=["wav"], key="prediction_audio")
 
-Button1 = Button(main, text="Support Vector Machine", command=existing_classifier)
-Button1.place(x=20,y=250)
-Button1.config(font=font1)
+if audio_file is not None:
+    st.audio(audio_file)
+    if st.button("Predict cry category"):
+        model_path = MODEL_DIR / "cnn_model.keras"
+        encoder_path = MODEL_DIR / "label_encoder.pkl"
+        if not model_path.exists() or not encoder_path.exists():
+            st.error("CNN model or label encoder not found. Train the CNN first.")
+        elif not TENSORFLOW_AVAILABLE:
+            st.error("TensorFlow is unavailable in this environment.")
+        else:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+                    temp_audio.write(audio_file.getvalue())
+                    audio_path = temp_audio.name
+                features = extract_features(audio_path).reshape(1, 10, 1)
+                model = load_model(model_path)
+                with open(encoder_path, "rb") as file:
+                    encoder = pickle.load(file)
+                probabilities = model.predict(features, verbose=0)[0]
+                predicted_index = int(np.argmax(probabilities))
+                predicted_label = encoder.inverse_transform([predicted_index])[0]
+                st.success(f"Predicted cry category: **{predicted_label}**")
+                st.write(f"Model confidence: {probabilities[predicted_index] * 100:.2f}%")
+                st.caption("This is a model prediction, not a medical diagnosis.")
 
-Button1 = Button(main, text="K Nearest Neighbour", command=existing_classifier1)
-Button1.place(x=20,y=300)
-Button1.config(font=font1)
+                audio, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+                fig, ax = plt.subplots(figsize=(10, 3))
+                librosa.display.waveshow(audio, sr=sample_rate, ax=ax)
+                ax.set_title(f"Audio waveform — predicted: {predicted_label}")
+                ax.set_xlabel("Time (seconds)")
+                ax.set_ylabel("Amplitude")
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+            except Exception as exc:
+                st.error(f"Prediction failed: {exc}")
+            finally:
+                try:
+                    os.remove(audio_path)
+                except (NameError, OSError):
+                    pass
 
-Button1 = Button(main, text="Decision Tree Classifier", command=existing_classifier2)
-Button1.place(x=20,y=350)
-Button1.config(font=font1)
-
-
-Button1 = Button(main, text="AdaBoost Classifier", command=existing_classifier4)
-Button1.place(x=20,y=400)
-Button1.config(font=font1)
-
-Button1 = Button(main, text="Linear Discriminant Analysis", command=existing_classifier5)
-Button1.place(x=20,y=450)
-Button1.config(font=font1)
-
-Button1 = Button(main, text="Proposed CNN", command=cnn_classifier)
-Button1.place(x=20,y=500)
-Button1.config(font=font1)
-
-Button1 = Button(main, text="Prediction", command=Prediction)
-Button1.place(x=20,y=550)
-Button1.config(font=font1)
-
-
-Button1 = Button(main, text="Exit", command=close)
-Button1.place(x=20,y=600)
-Button1.config(font=font1)
-
-
-
-                            
-font1 = ('times', 12, 'bold')
-text=Text(main,height=30,width=70)
-scroll=Scrollbar(text)
-text.configure(yscrollcommand=scroll.set)
-text.place(x=300,y=100)
-text.config(font=font1)
-main.config(bg='SeaGreen1')
-
-main.mainloop()
+st.caption("Note: model performance depends on dataset size, class balance, recording quality, and correct labels.")
